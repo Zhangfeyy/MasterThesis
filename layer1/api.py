@@ -26,10 +26,10 @@ Rules:
 
 BATCH_SIZE = 100
 
-OUTPUT = "../data/network1/network1_sentiment.csv"
+OUTPUT = "../data/layer1/layer1_sentiment.csv"
 
 if __name__ == "__main__":
-    df = pd.read_csv("../data/network1/network1_sentence.csv")
+    df = pd.read_csv("../data/layer1/layer1_sentence.csv")
     df["id"] = df.index
 
     llm = AgentsLLM()
@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
         tasks = [
             agent_process(PROMPT,llm, idx, row["sentence"], sem=sem)
-            for idx, row in batch_df.iterrows()
+            for idx, row in batch_df.iterrows()  
         ]
 
         batch_results = loop.run_until_complete(tqdm.gather(*tasks))
