@@ -1,0 +1,205 @@
+---
+title: "Multiplex Network Analysis"
+author: "Feiya Zhang"
+date: "2026-04-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+The study mainly utilized the tool from the package [statenet](https://github.com/statnet/ergm.multi) to analyze the multiplex network.
+
+```{r setup}
+pkgs <- c("ergm","network", "ggrepel","ergm.multi","dplyr","sna")
+
+if (any(!sapply(pkgs, requireNamespace, quietly = TRUE))) {
+  install.packages(pkgs)
+}
+# library(ergm)
+library(network)
+library(ergm.multi)
+library(dplyr)
+library(sna)
+# library(ggrepel)
+```
+
+
+## Preparation
+Although the two layers share the same set of nodes (states), but the active nodes are different in each layer. More specifically, only states have ties in the layer which can be regarded as 'active', otherwise they are inactive isolated nodes. Therefore, the study first created the union of states across two layers then mapped the union to each layer to keep them with the same nodes. In addition, 'network' identifies nodes through numeric indices, thus the study also created a mapping name-number list in the beginning.
+
+Considering weights, Poisson distribution can only process integers, accordingly, the study also zoomed in the data by multiplying the original weight by 100 and set up two processed networks exclusively for unweighted calculation and poisson related calculation.
+
+#NOTE
+el1/layer1/p: positive interaction layer
+el2/layer2/c: common issue layer
+
+```{r}
+el1 <- read.csv("../data/layer1/layer1_backbone_pos.csv")
+el2 <- read.csv("../data/layer2/layer2_backbone_filtered.csv")
+```
+
+
+```{r}
+glimpse(el1)
+glimpse(el2)
+```
+```{r}
+all_nodes <- sort(unique(c(el1$s1, el1$s2, el2$source, el2$target)))
+n_nodes <- length(all_nodes)
+
+node_map <- data.frame(
+  node = all_nodes,
+  id = seq_along(all_nodes)
+)
+
+# mapping ids to the nodes
+el1_mapped <- merge(el1, node_map, by.x = "s1", by.y = "node", all.x = TRUE)
+names(el1_mapped)[names(el1_mapped) == "id"] <- "source_id"
+el1_mapped <- merge(el1_mapped, node_map, by.x = "s2", by.y = "node", all.x = TRUE)
+names(el1_mapped)[names(el1_mapped) == "id"] <- "target_id"
+el1_final <- el1_mapped[, c("source_id", "target_id", "avg_score")]
+
+el2_mapped <- merge(el2, node_map, by.x = "source", by.y = "node", all.x = TRUE)
+names(el2_mapped)[names(el2_mapped) == "id"] <- "source_id"
+el2_mapped <- merge(el2_mapped, node_map, by.x = "target", by.y = "node", all.x = TRUE)
+names(el2_mapped)[names(el2_mapped) == "id"] <- "target_id"
+el2_final <- el2_mapped[, c("source_id", "target_id", "weight")]
+```
+
+
+```{r}
+make_valued_net <- function(el, nodes, weight_col) {
+  n <- length(nodes)
+  net <- network.initialize(n, directed = FALSE)
+  network.vertex.names(net) <- nodes
+  add.edges(net, tail = el$source_id, head = el$target_id)
+  # align weights
+  el_net <- as.data.frame(as.edgelist(net))
+  colnames(el_net) <- c("source_id", "target_id")
+  el_net$weight <- NA
+  for (i in 1:nrow(el_net)) {
+    idx <- which(
+      (el$source_id == el_net$source_id[i] & el$target_id == el_net$target_id[i]) |
+      (el$source_id == el_net$target_id[i] & el$target_id == el_net$source_id[i])
+    )
+    if (length(idx) > 0) {
+      el_net$weight[i] <- el[[weight_col]][idx[1]]
+    }
+  }
+  set.edge.attribute(net, "weight", el_net$weight)
+  return(net)
+}
+
+net1_valued <- make_valued_net(el1_final, all_nodes, 'avg_score')
+net2_valued <- make_valued_net(el2_final, all_nodes, 'weight')
+```
+
+
+```{r}
+make_unweighted_net <- function(el, nodes) {
+  n <- length(nodes)
+  net <- network.initialize(n, directed = FALSE)
+  network.vertex.names(net) <- nodes
+  add.edges(net, tail = el$source_id, head = el$target_id)
+  return(net)
+}
+
+net1_unweighted <- make_unweighted_net(el1_final, all_nodes)
+net2_unweighted <- make_unweighted_net(el2_final, all_nodes)
+```
+
+
+```{r}
+make_poi_net <- function(el, nodes, weight_col) {
+  n <- length(nodes)
+  net <- network.initialize(n, directed = FALSE)
+  network.vertex.names(net) <- nodes
+  add.edges(net, tail = el$source_id, head = el$target_id)
+  # align weights
+  el_net <- as.data.frame(as.edgelist(net))
+  colnames(el_net) <- c("source_id", "target_id")
+  el_net$weight <- NA
+  for (i in 1:nrow(el_net)) {
+    idx <- which(
+      (el$source_id == el_net$source_id[i] & el$target_id == el_net$target_id[i]) |
+      (el$source_id == el_net$target_id[i] & el$target_id == el_net$source_id[i])
+    )
+    if (length(idx) > 0) {
+      el_net$weight[i] <- as.integer(round(el[[weight_col]][idx[1]] * 100))
+    }
+  }
+  set.edge.attribute(net, "weight", el_net$weight)
+  return(net)
+}
+
+net1_poi <- make_poi_net(el1_final, all_nodes, 'avg_score')
+net2_poi <- make_poi_net(el2_final, all_nodes, 'weight')
+```
+
+
+Also we might be curious about home many inactive nodes in each layer. The data presents that there are 82 nodes in the layer1 while 3 nodes in the layer2. From a structural perspective, the network is a unaligned multicomplex network. It shares the same set of nodes across different layers but with differentiated numbers in each layer. 
+
+```{r}
+net1_num_isolates <- sum(degree(net1_unweighted) == 0)
+net1_size <- network.size(net1_unweighted)
+net2_num_isolates <- sum(degree(net2_unweighted) == 0)
+net2_size <- network.size(net2_unweighted)
+
+cat("inactivate node numer in the layer1: ", net1_num_isolates, "; total node number: ", net1_size, "\n")
+cat("inactivate node numer in the layer2: ", net2_num_isolates, "; total node number: ", net2_size, "\n")
+
+```
+
+
+## Model Fitting
+
+```{r}
+unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+
+fit_cmb <- ergm(unweighted_multi ~ L(~edges, ~.) + CMBL(~.))
+
+# 3. 查看结果
+summary(fit_cmb)
+
+```
+
+```{r}
+unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+
+fit_and <- ergm(
+  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~p&c)
+)
+summary(fit_and)
+```
+
+```{r}
+unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+
+fit_xor <- ergm(
+  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~xor(p,c))
+)
+summary(fit_xor)
+```
+
+```{r}
+unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+
+fit_or <- ergm(
+  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~p|c)
+)
+summary(fit_or)
+```
+
+```{r}
+unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+
+fit_2star_ndis <- ergm(
+  unweighted_multi ~ edges + twostarL(list(~c, ~p), distinct = FALSE)
+)
+
+summary(fit_2star_ndis)
+
+```

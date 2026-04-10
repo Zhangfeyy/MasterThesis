@@ -2,3 +2,5 @@
 cookies.txt
 /data
 /layer1/__pycache__
+.RData
+.Rhistory
