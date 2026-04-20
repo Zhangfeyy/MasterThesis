@@ -12,8 +12,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Introduction
 The study mainly utilized the tool from the package [statenet](https://github.com/statnet/ergm.multi) to analyze the multiplex network.
 
-```{r setup}
-pkgs <- c("ergm","network", "ggrepel","ergm.multi","dplyr","sna")
+```{r}
+pkgs <- c("ergm","network", "ggrepel","ergm.multi","dplyr","sna","tidyverse")
 
 if (any(!sapply(pkgs, requireNamespace, quietly = TRUE))) {
   install.packages(pkgs)
@@ -23,14 +23,12 @@ library(network)
 library(ergm.multi)
 library(dplyr)
 library(sna)
+library(tidyverse)
 # library(ggrepel)
 ```
 
 
-## Preparation
-Although the two layers share the same set of nodes (states), but the active nodes are different in each layer. More specifically, only states have ties in the layer which can be regarded as 'active', otherwise they are inactive isolated nodes. Therefore, the study first created the union of states across two layers then mapped the union to each layer to keep them with the same nodes. In addition, 'network' identifies nodes through numeric indices, thus the study also created a mapping name-number list in the beginning.
-
-Considering weights, Poisson distribution can only process integers, accordingly, the study also zoomed in the data by multiplying the original weight by 100 and set up two processed networks exclusively for unweighted calculation and poisson related calculation.
+The network consists of the same set of nodes (states) across layers, but the active nodes differ in each layer. Only states with ties in a given layer are considered 'active', while others are inactive, isolated nodes. To ensure comparability, the study first created the union of all states across both layers and mapped this union to each layer, so each network contains the same nodes. Since the package network uses numeric indices to identify nodes, a name-to-number mapping list was created at the outset. For edge weights, because the Poisson distribution requires integer values, the original weights were multiplied by 100. Apart from the orginal weighted network, Two processed versions of each network were prepared: one unweighted and one with integer weights for Poisson-related calculations. However, the study only used the unweighted network for research.
 
 #NOTE
 el1/layer1/p: positive interaction layer
@@ -103,7 +101,7 @@ make_unweighted_net <- function(el, nodes) {
   n <- length(nodes)
   net <- network.initialize(n, directed = FALSE)
   network.vertex.names(net) <- nodes
-  add.edges(net, tail = el$source_id, head = el$target_id)
+  network::add.edges(net, tail = el$source_id, head = el$target_id)
   return(net)
 }
 
@@ -139,8 +137,7 @@ net1_poi <- make_poi_net(el1_final, all_nodes, 'avg_score')
 net2_poi <- make_poi_net(el2_final, all_nodes, 'weight')
 ```
 
-
-Also we might be curious about home many inactive nodes in each layer. The data presents that there are 82 nodes in the layer1 while 3 nodes in the layer2. From a structural perspective, the network is a unaligned multicomplex network. It shares the same set of nodes across different layers but with differentiated numbers in each layer. 
+We may also be interested in the number of inactive nodes in each layer. The data shows that there are 82 inactive nodes in layer 1 and 3 inactive nodes in layer 2. Structurally, the network is an unaligned multicomplex network: it shares the same set of nodes across layers, but the number of active nodes differs in each layer.
 
 ```{r}
 net1_num_isolates <- sum(degree(net1_unweighted) == 0)
@@ -152,54 +149,214 @@ cat("inactivate node numer in the layer1: ", net1_num_isolates, "; total node nu
 cat("inactivate node numer in the layer2: ", net2_num_isolates, "; total node number: ", net2_size, "\n")
 
 ```
-
-
-## Model Fitting
-
 ```{r}
-unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+# Extract node IDs from vertex.names
+nodes <- network.vertex.names(net1_unweighted)
 
-fit_cmb <- ergm(unweighted_multi ~ L(~edges, ~.) + CMBL(~.))
+n <- length(nodes)
+ncol_grid <- ceiling(sqrt(n))
+nrow_grid <- ceiling(n / ncol_grid)
 
-# 3. 查看结果
-summary(fit_cmb)
+grid_df <- data.frame(
+  node_id = nodes,
+  x = rep(1:ncol_grid, length.out = n),
+  y = rep(nrow_grid:1, each = ncol_grid, length.out = n),
+  stringsAsFactors = FALSE
+)
+
+# Detect presence in each network
+deg1 <- sna::degree(net1_unweighted)
+deg2 <- sna::degree(net2_unweighted)
+
+grid_df <- grid_df %>%
+  mutate(
+    in_net1 = deg1 > 0,
+    in_net2 = deg2 > 0,
+    group = case_when(
+      in_net1 & in_net2 ~ "Both",
+      in_net1 ~ "Positive Interaction Layer",
+      in_net2 ~ "Common Issue Layer",
+      TRUE ~ "None"
+    )
+  )
+ggplot(grid_df, aes(x = x, y = y, fill = group)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_manual(values = c(
+    "Positive Interaction Layer" = "#D8A48F",
+    "Common Issue Layer" = "#9FBFBE",
+    "Both" = "#A6A6A6",
+    "None" = "grey90"
+  )) +
+  coord_equal() +
+  theme_void() +
+  labs(
+    title = "Grid View of Overlapping Networks",
+    fill = "Membership"
+  )
 
 ```
 
+## Model Fitting
+The study ran several default models on the data and evaluated their goodness of fit. Since the two layers are distinct, with the l-p layer being more sparse and the l-c layer more dense, they were treated separately.
+
+### CMB
+The default CMB model shows a very poor fit to the observed network. There are substantial discrepancies in the degree distributions, as well as on the left-hand sides of both the ESP and minimum geodesic distance distributions. Therefore, the study first adjusted the densities by fitting each layer separately, rather than applying a uniform standard. In addition, the l-c layer is quite unique, with low density but high transitivity. Therefore, the study tried different ways but unfortunately all failed. 
+
 ```{r}
 unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
+fit_cmb <- ergm(unweighted_multi ~ L(~edges, ~.) + CMBL(~.))
+summary(fit_cmb)
+```
 
-fit_and <- ergm(
-  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~p&c)
+```{r}
+gof_cmb <- gof(fit_cmb)
+summary(gof_cmb)
+plot(gof_cmb)
+```
+
+
+```{r}
+fit_cmb_f1 <- ergm(
+  unweighted_multi ~ 
+    L(~edges, ~p) +   # allow p to have its own density
+    # L(~gwesp(0.1, fixed=TRUE), ~p) +
+    L(~edges, ~c) +
+    # L(~gwesp(0.01, fixed=TRUE), ~c) +
+    # L(~gwdegree(0.05, fixed=TRUE), ~c) +
+    # L(~concurrent, ~c) +
+    CMBL(~.), 
+    # estimator = "MPLE"
+  control = control.ergm(
+    seed = 1,               
+    MCMLE.maxit = 20, 
+    MCMC.samplesize = 10000
+  )
 )
+```
+
+```{r}
+summary(fit_cmb_f1)
+```
+
+```{r}
+gof_cmb_f1 <- gof(fit_cmb_f1)
+summary(gof_cmb_f1)
+plot(gof_cmb_f1)
+```
+```{r, eval=FALSE}
+fit_cmb_f2 <- ergm(
+  unweighted_multi ~ 
+    L(~edges, ~p) +   # allow p to have its own density
+    # L(~gwesp(0.1, fixed=TRUE), ~p) +
+    L(~edges, ~c) +
+    L(~gwesp(0.1, fixed=TRUE), ~c) +
+    # L(~gwdegree(0.05, fixed=TRUE), ~c) +
+    # L(~concurrent, ~c) +
+    L(~gwdegree(0.5, fixed=TRUE), ~p) +  
+    L(~gwdegree(0.5, fixed=TRUE), ~c) +
+    CMBL(~.), 
+    # estimator = "MPLE"
+  control = control.ergm(
+    seed = 4,               
+    MCMLE.maxit = 20, 
+    MCMC.samplesize = 10000
+  )
+)
+```
+
+
+```{r,eval=FALSE}
+gof_cmb_f2 <- gof(fit_cmb_f2)
+summary(gof_cmb_f2)
+plot(gof_cmb_f2)
+```
+
+### AND
+
+```{r}
+fit_and <- ergm(
+  unweighted_multi ~ 
+    L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~p&c),
+  control = control.ergm(
+    seed = 2,               
+    MCMLE.maxit = 20, 
+    MCMC.samplesize = 10000
+  )
+)
+```
+
+```{r}
 summary(fit_and)
 ```
 
+
 ```{r}
+gof_and <- gof(fit_and)
+summary(gof_and)
+plot(gof_and)
+```
+
+
+```{r,eval=FALSE}
 unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
 
 fit_xor <- ergm(
-  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~xor(p,c))
+  unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + 
+    L(~edges, ~xor(p,c))
 )
+```
+
+```{r,eval=FALSE}
 summary(fit_xor)
 ```
 
-```{r}
+```{r,eval=FALSE}
+gof_xor <- gof(fit_xor)
+summary(gof_xor)
+plot(gof_xor)
+```
+
+
+```{r,eval=FALSE}
 unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
 
 fit_or <- ergm(
   unweighted_multi ~L(~edges, ~p) + L(~edges, ~c) + L(~edges, ~p|c)
 )
+```
+
+
+```{r,eval=FALSE}
 summary(fit_or)
+```
+
+```{r,eval=FALSE}
+gof_or <- gof(fit_or)
+summary(gof_or)
+plot(gof_or)
 ```
 
 ```{r}
 unweighted_multi <- Layer(p=net1_unweighted,c=net2_unweighted)
 
 fit_2star_ndis <- ergm(
-  unweighted_multi ~ edges + twostarL(list(~c, ~p), distinct = FALSE)
+  unweighted_multi ~ edges + twostarL(list(~c, ~p), distinct = FALSE) + 
+  L(~edges, ~p&c),
+  # CMBL(~.) degeneracy problem
+  control = control.ergm(
+    seed = 3,               
+    MCMLE.maxit = 20, 
+    MCMC.samplesize = 10000
+  )
 )
+```
 
+```{r}
 summary(fit_2star_ndis)
+```
 
+```{r}
+gof_2star <- gof(fit_2star_ndis)
+summary(gof_2star)
+plot(gof_2star)
 ```
